@@ -530,6 +530,7 @@ pub mod internal {
         pub grpc_subchannel_count: Option<usize>,
         pub grpc_request_buffer_capacity: Option<usize>,
         pub grpc_max_header_list_size: Option<u32>,
+        pub custom_headers: Option<http::HeaderMap>,
     }
 
     impl<Cr> std::default::Default for ClientConfig<Cr> {
@@ -552,6 +553,7 @@ pub mod internal {
                 grpc_subchannel_count: None,
                 grpc_request_buffer_capacity: None,
                 grpc_max_header_list_size: None,
+                custom_headers: None,
             }
         }
     }

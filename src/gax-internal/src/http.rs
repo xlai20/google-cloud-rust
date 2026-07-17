@@ -92,6 +92,12 @@ impl ReqwestClient {
         if config.disable_follow_redirects {
             builder = builder.redirect(::reqwest::redirect::Policy::none());
         }
+
+        // Apply global custom headers as defaults. These have the lowest precedence
+        // and will be overridden by system headers.
+        if let Some(ref custom_headers) = config.custom_headers {
+            builder = builder.default_headers(custom_headers.clone());
+        }
         let inner = builder.build().map_err(BuilderError::transport)?;
         let universe_domain =
             crate::universe_domain::resolve(config.universe_domain.as_deref(), &cred).await?;

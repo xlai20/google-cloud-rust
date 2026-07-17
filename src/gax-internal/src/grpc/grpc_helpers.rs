@@ -64,11 +64,18 @@ pub(crate) fn make_credentials(config: &ClientConfig) -> ClientBuilderResult<Cre
 /// Custom headers can be provided through `RequestOptions`.
 /// Returns an error if any of the header values fail to parse.
 pub(crate) fn make_headers(
+    global_headers: Option<&HeaderMap>,
     api_client_header: &'static str,
     request_params: &str,
     options: &RequestOptions,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
+
+    // Add global custom headers first so they have the lowest precedence and can be 
+    // overwritten by request-level or system-level headers.
+    if let Some(global_headers) = global_headers {
+        headers.extend(global_headers.clone());
+    }
 
     if let Some(user_agent) = options.user_agent() {
         headers.insert(
@@ -235,7 +242,7 @@ mod tests {
         options.set_quota_project(QUOTA_PROJECT);
 
         // Act
-        let headers = make_headers(API_CLIENT_HEADER, REQUEST_PARAMS, &options)?;
+        let headers = make_headers(None, API_CLIENT_HEADER, REQUEST_PARAMS, &options)?;
 
         // Assert
         assert_eq!(headers.get(X_GOOG_API_CLIENT).unwrap(), API_CLIENT_HEADER);
@@ -248,7 +255,7 @@ mod tests {
     #[test]
     fn make_headers_omits_unset_params() -> TestResult {
         // Act
-        let headers = make_headers(API_CLIENT_HEADER, "", &RequestOptions::default())?;
+        let headers = make_headers(None, API_CLIENT_HEADER, "", &RequestOptions::default())?;
 
         // Assert
         assert_eq!(headers.get(X_GOOG_API_CLIENT).unwrap(), API_CLIENT_HEADER);
@@ -274,7 +281,7 @@ mod tests {
         let options = RequestOptions::default().insert_extension(custom_headers);
 
         // Act
-        let headers = make_headers(API_CLIENT_HEADER, CUSTOM_REQUEST_PARAMS, &options)?;
+        let headers = make_headers(None, API_CLIENT_HEADER, CUSTOM_REQUEST_PARAMS, &options)?;
 
         // Assert
         assert_eq!(headers.get(X_GOOG_API_CLIENT).unwrap(), API_CLIENT_HEADER);
@@ -291,18 +298,18 @@ mod tests {
         // Invalid user agent
         let mut options = RequestOptions::default();
         options.set_user_agent("invalid\nagent");
-        let res = make_headers(API_CLIENT_HEADER, "param=1", &options);
+        let res = make_headers(None, API_CLIENT_HEADER, "param=1", &options);
         assert!(res.is_err(), "{res:?}");
 
         // Invalid quota project
         let mut options = RequestOptions::default();
         options.set_quota_project("invalid\nproject");
-        let res = make_headers(API_CLIENT_HEADER, "param=1", &options);
+        let res = make_headers(None, API_CLIENT_HEADER, "param=1", &options);
         assert!(res.is_err(), "{res:?}");
 
         // Invalid request params
         let options = RequestOptions::default();
-        let res = make_headers(API_CLIENT_HEADER, "invalid\nparams", &options);
+        let res = make_headers(None, API_CLIENT_HEADER, "invalid\nparams", &options);
         assert!(res.is_err(), "{res:?}");
     }
 }
