@@ -221,6 +221,29 @@ pub trait RequestOptionsBuilder: internal::RequestBuilder {
     {
         unimplemented!();
     }
+
+    /// Sets a custom header for the request.
+    ///
+    /// These headers override any headers set by `with_custom_header` on
+    /// the client builder.
+    fn with_custom_header<K, V>(mut self, name: K, value: V) -> Self
+    where
+        Self: Sized,
+        K: TryInto<http::header::HeaderName>,
+        V: TryInto<http::header::HeaderValue>,
+    {
+        use crate::options::internal::RequestOptionsExt;
+        if let (Ok(name), Ok(value)) = (name.try_into(), value.try_into()) {
+            let mut headers = self
+                .request_options()
+                .get_extension::<http::HeaderMap>()
+                .cloned()
+                .unwrap_or_default();
+            headers.insert(name, value);
+            self.request_options().extensions.insert(headers);
+        }
+        self
+    }
 }
 
 #[cfg_attr(not(feature = "_internal-semver"), doc(hidden))]

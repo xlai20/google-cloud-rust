@@ -43,8 +43,17 @@ pub(crate) async fn add_auth_headers(
         unreachable!("headers are not cached");
     };
 
-    // Note that client headers override credential headers (e.g. for `x-goog-user-project`).
-    data.extend(headers);
+    // Note that client headers override credential headers (e.g. for `x-goog-user-project`),
+    // but system auth headers (like Authorization) from credentials must not be overridden
+    // by user's custom headers. Since `x-goog-user-project` is the main one that options
+    // overrides, we explicitly handle this.
+    for (name, value) in headers {
+        if let Some(name) = name {
+            if name != http::header::AUTHORIZATION {
+                data.insert(name, value);
+            }
+        }
+    }
     Ok(data)
 }
 
@@ -71,10 +80,12 @@ pub(crate) fn make_headers(
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
 
-    // Add global custom headers first so they have the lowest precedence and can be 
-    // overwritten by request-level or system-level headers.
     if let Some(global_headers) = global_headers {
         headers.extend(global_headers.clone());
+    }
+
+    if let Some(custom_headers) = options.get_extension::<HeaderMap>() {
+        headers.extend(custom_headers.clone());
     }
 
     if let Some(user_agent) = options.user_agent() {
@@ -91,7 +102,7 @@ pub(crate) fn make_headers(
         );
     }
 
-    headers.append(
+    headers.insert(
         X_GOOG_API_CLIENT,
         http::header::HeaderValue::from_static(api_client_header),
     );
@@ -103,14 +114,10 @@ pub(crate) fn make_headers(
         //     If none of the routing parameters matched their respective
         //     fields, the routing header **must not** be sent.
         //
-        headers.append(
+        headers.insert(
             X_GOOG_REQUEST_PARAMS,
             http::header::HeaderValue::from_str(request_params).map_err(Error::ser)?,
         );
-    }
-
-    if let Some(custom_headers) = options.get_extension::<HeaderMap>() {
-        headers.extend(custom_headers.clone());
     }
 
     Ok(headers)

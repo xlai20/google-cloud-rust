@@ -92,9 +92,6 @@ impl ReqwestClient {
         if config.disable_follow_redirects {
             builder = builder.redirect(::reqwest::redirect::Policy::none());
         }
-
-        // Apply global custom headers as defaults. These have the lowest precedence
-        // and will be overridden by system headers.
         if let Some(ref custom_headers) = config.custom_headers {
             builder = builder.default_headers(custom_headers.clone());
         }
@@ -427,6 +424,16 @@ impl ReqwestClient {
             Ok(CacheableResource::New { data, .. }) => data,
             Ok(CacheableResource::NotModified) => unreachable!("headers are not cached"),
         };
+
+        use google_cloud_gax::options::internal::RequestOptionsExt;
+        if let Some(custom_headers) = options.get_extension::<http::HeaderMap>() {
+            for (name, value) in custom_headers {
+                // Only insert if it doesn't already exist to preserve system headers
+                if !headers.contains_key(name) {
+                    headers.insert(name.clone(), value.clone());
+                }
+            }
+        }
 
         if let Some(user_agent) = options.user_agent() {
             headers.insert(

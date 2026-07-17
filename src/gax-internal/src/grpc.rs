@@ -72,7 +72,7 @@ pub struct Client {
     credentials: Credentials,
     transport_policies: TransportPolicies,
     attempt_interceptor: Option<Arc<dyn AttemptInterceptor>>,
-    custom_headers: Option<http::HeaderMap>,
+    custom_headers: Option<HeaderMap>,
 }
 
 impl Client {
