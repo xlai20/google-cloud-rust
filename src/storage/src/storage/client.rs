@@ -721,6 +721,24 @@ impl ClientBuilder {
         self
     }
 
+    /// Injects a custom HTTP header into the client.
+    ///
+    /// The headers will be applied to all requests made by this client.
+    pub fn with_custom_header<K, V>(mut self, name: K, value: V) -> Self
+    where
+        K: TryInto<http::header::HeaderName>,
+        V: TryInto<http::header::HeaderValue>,
+    {
+        if let (Ok(name), Ok(value)) = (name.try_into(), value.try_into()) {
+            let headers = self
+                .config
+                .custom_headers
+                .get_or_insert_with(http::HeaderMap::new);
+            headers.insert(name, value);
+        }
+        self
+    }
+
     pub(crate) fn apply_default_credentials(&mut self) -> BuilderResult<()> {
         if self.config.cred.is_some() {
             return Ok(());
