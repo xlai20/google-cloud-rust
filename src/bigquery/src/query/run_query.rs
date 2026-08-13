@@ -19,13 +19,50 @@ use crate::query::{Query, Result};
 use google_cloud_bigquery_v2::client::JobService;
 use google_cloud_bigquery_v2::model::query_request::JobCreationMode;
 use google_cloud_bigquery_v2::model::{
-    InsertJobRequest, Job, JobConfiguration, PostQueryRequest, QueryRequest,
+    InsertJobRequest, Job, JobConfiguration, JobReference, PostQueryRequest, QueryRequest,
 };
 use std::sync::Arc;
+use uuid::Uuid;
 
-/// A unified request builder for configuring and running a SQL query.
-/// It automatically routes to either `jobs.query` (fast path) or `jobs.insert` (job path)
-/// depending on the configured fields.
+pub(crate) const JOB_ID_PREFIX: &str = "job_";
+pub(crate) const QUERY_REQUEST_ID_PREFIX: &str = "req_";
+
+/// A builder for executing a SQL query.
+///
+/// [`BigQuery::query()`](crate::client::BigQuery::query) returns a `RunQuery`.
+///
+/// # Automatic Path Routing
+///
+/// The implementation routes internally to [jobs.query] (fast path) or
+/// [jobs.insert] (job path) depending on configured fields. If the fast path is
+/// available, the client library takes it. If not, it falls back to creating a
+/// job, which is typically slower.
+///
+/// [jobs.query]: https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs/query
+/// [jobs.insert]: https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs/insert
+///
+/// # Example
+///
+/// ```
+/// # use google_cloud_bigquery::client::BigQuery;
+/// # async fn sample(client: BigQuery) -> anyhow::Result<()> {
+/// let mut rows = client
+///     .query("SELECT name FROM `bigquery-public-data.usa_names.usa_1910_2013` WHERE state = 'TX' LIMIT 100")
+///     .set_location("US")
+///     .set_max_results(50_u32)
+///     .run()
+///     .await?
+///     .until_done()
+///     .await?
+///     .read();
+///
+/// while let Some(row) = rows.next().await.transpose()? {
+///     let name: String = row.get("name");
+///     println!("Name: {name}");
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct RunQuery {
     pub(crate) job_service: Arc<JobService>,
@@ -46,29 +83,85 @@ impl RunQuery {
         }
     }
 
-    /// Sets the project ID to override the default client project ID.
+    /// Sets the project ID to override the default client project ID for query
+    /// execution and billing.
+    ///
+    /// If you configured a default project ID on the
+    /// [`BigQuery`][crate::client::BigQuery] client via
+    /// [`ClientBuilder::with_project_id`][crate::client_builder::ClientBuilder::with_project_id],
+    /// the query inherits it automatically. Calling this method overrides the
+    /// project ID for this specific query.
+    ///
+    /// You must specify a project ID either on the client or on the query
+    /// builder before calling [`run()`](RunQuery::run); otherwise, `run()`
+    /// returns [`QueryError::MissingProjectId`](crate::error::QueryError::MissingProjectId).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use google_cloud_bigquery::client::BigQuery;
+    /// # async fn sample(client: BigQuery) -> anyhow::Result<()> {
+    /// let query_handle = client
+    ///     .query("SELECT 1 AS count")
+    ///     .with_project_id("my-project-id")
+    ///     .run()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_project_id<S: Into<String>>(mut self, project_id: S) -> Self {
         self.project_id = Some(project_id.into());
         self
     }
 
-    /// Executes the SQL query
+    /// Executes the SQL query.
     ///
-    /// The implementation routes internally to [jobs.query] (fast path)
-    /// or [jobs.insert] (job path) depending on configured fields.
-    /// If the fast path is available, the client library takes it.
-    /// If not, it falls back to creating a job, which is typically slower.
+    /// This returns a [`Query`](crate::query::Query) handle representing an
+    /// asynchronous background job executing on BigQuery, or an already
+    /// completed query if it ran fast enough using the fast query path
+    /// ([jobs.query]).
+    ///
+    /// You can call [`until_done()`](crate::query::Query::until_done) on the
+    /// returned handle to wait for the final results.
+    ///
+    /// You must configure a target project ID on either the
+    /// [`BigQuery`][crate::client::BigQuery] client via
+    /// [`ClientBuilder::with_project_id`][crate::client_builder::ClientBuilder::with_project_id]
+    /// or on this builder via [`with_project_id()`](RunQuery::with_project_id).
     ///
     /// [jobs.query]: https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs/query
-    /// [jobs.insert]: https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs/insert
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use google_cloud_bigquery::client::BigQuery;
+    /// # async fn sample(client: BigQuery) -> anyhow::Result<()> {
+    /// let completed_query = client
+    ///     .query("SELECT CURRENT_TIMESTAMP() AS now")
+    ///     .run()
+    ///     .await?
+    ///     .until_done()
+    ///     .await?;
+    ///
+    /// let mut rows = completed_query.read();
+    /// if let Some(row) = rows.next().await.transpose()? {
+    ///     let now: String = row.get("now");
+    ///     println!("Current time: {now}");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn run(self) -> Result<Query> {
         let project_id = self.project_id.ok_or(QueryError::MissingProjectId)?;
         let max_results = self.request.max_results;
 
         if self.request.force_job_path() {
             // Route to jobs.insert
+            let job_ref = generate_job_reference(&project_id, &self.request.location);
             let job_config: JobConfiguration = self.request.into();
-            let job = Job::new().set_configuration(job_config);
+            let job = Job::new()
+                .set_configuration(job_config)
+                .set_job_reference(job_ref);
             let req = InsertJobRequest::new()
                 .set_job(job)
                 .set_project_id(project_id);
@@ -77,12 +170,15 @@ impl RunQuery {
                 .execute()
                 .await
         } else {
+            let query_request_id = generate_prefixed_id(QUERY_REQUEST_ID_PREFIX);
             // Route to jobs.query
             let query_request: QueryRequest = self.request.into();
-            let query_request = query_request.set_format_options(
-                google_cloud_bigquery_v2::model::DataFormatOptions::new()
-                    .set_use_int64_timestamp(true),
-            );
+            let query_request = query_request
+                .set_format_options(
+                    google_cloud_bigquery_v2::model::DataFormatOptions::new()
+                        .set_use_int64_timestamp(true),
+                )
+                .set_request_id(query_request_id);
             let req = PostQueryRequest::new()
                 .set_project_id(project_id)
                 .set_query_request(query_request);
@@ -94,17 +190,49 @@ impl RunQuery {
     }
 }
 
+// Create a job reference with a generated job ID.
+//
+// BigQuery does not strictly define a format for job IDs, just a limit in size.
+// See https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/JobReference
+fn generate_job_reference(project_id: &str, location: &str) -> JobReference {
+    let job_id = generate_prefixed_id(JOB_ID_PREFIX);
+    let mut job_ref = JobReference::new()
+        .set_project_id(project_id.to_string())
+        .set_job_id(job_id);
+
+    if !location.is_empty() {
+        job_ref = job_ref.set_location(location.to_string());
+    }
+    job_ref
+}
+
+// Create a random ID with the given prefix and a UUID.
+//
+// BigQuery does not strictly define a format for request and job IDs, just a limit in size.
+// However, request IDs are more restrictive and have a limit of 36 characters.
+// UUID v4 simple format is used to reduce length.
+//
+// See https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/jobs/query#QueryRequest for request ID
+// and https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/JobReference for job ID.
+fn generate_prefixed_id(prefix: &str) -> String {
+    format!("{prefix}{}", Uuid::new_v4().simple())
+}
+
 include!("../generated/run_query_builder.rs");
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::QueryError;
     use crate::query::tests::{MockJobService, create_job_service};
     use google_cloud_bigquery_v2::model::query_request::JobCreationMode;
     use google_cloud_bigquery_v2::model::{
         Job, JobConfiguration, JobReference, JobStatus, QueryRequest, QueryResponse,
     };
     use google_cloud_gax::response::Response;
+
+    // bigquery limits request id to 36 characters
+    const BIGQUERY_REQ_ID_LIMIT: usize = 36;
 
     type TestResult = anyhow::Result<()>;
 
@@ -141,10 +269,38 @@ mod tests {
         assert!(matches!(res, Err(QueryError::MissingProjectId)));
     }
 
+    #[test]
+    fn test_generate_prefixed_id() {
+        let job_id = generate_prefixed_id(JOB_ID_PREFIX);
+        assert!(job_id.starts_with(JOB_ID_PREFIX), "{job_id:?}");
+        assert!(
+            Uuid::parse_str(&job_id[JOB_ID_PREFIX.len()..]).is_ok(),
+            "{job_id:?}"
+        );
+
+        let req_id = generate_prefixed_id(QUERY_REQUEST_ID_PREFIX);
+        assert!(req_id.starts_with(QUERY_REQUEST_ID_PREFIX), "{req_id:?}");
+        assert!(req_id.len() <= BIGQUERY_REQ_ID_LIMIT, "{req_id:?}");
+        assert!(
+            Uuid::parse_str(&req_id[QUERY_REQUEST_ID_PREFIX.len()..]).is_ok(),
+            "{req_id:?}"
+        );
+    }
+
+    #[test]
+    fn test_generate_job_reference() {
+        let job_ref = generate_job_reference("my-project", "us-central1");
+        assert_eq!(job_ref.project_id, "my-project");
+        assert!(job_ref.job_id.starts_with(JOB_ID_PREFIX), "{job_ref:?}");
+        assert_eq!(job_ref.location.as_deref(), Some("us-central1"));
+    }
+
     #[tokio::test]
     async fn test_run_jobs_insert() -> TestResult {
         let mut mock = MockJobService::new();
-        mock.expect_insert_job().returning(|_, _| {
+        mock.expect_insert_job().returning(|req, _| {
+            let job_ref = req.job.as_ref().unwrap().job_reference.as_ref().unwrap();
+            assert!(job_ref.job_id.starts_with(JOB_ID_PREFIX), "{job_ref:?}");
             let job_ref = JobReference::new()
                 .set_job_id("test-job")
                 .set_project_id("my-project");
@@ -167,14 +323,20 @@ mod tests {
     #[tokio::test]
     async fn test_run_jobs_query() -> TestResult {
         let mut mock = MockJobService::new();
-        mock.expect_query()
-            .returning(move |_, _| Ok(Response::from(QueryResponse::new())));
+        mock.expect_query().returning(move |req, _| {
+            let req_id = &req.query_request.as_ref().unwrap().request_id;
+            assert!(req_id.starts_with(QUERY_REQUEST_ID_PREFIX), "{req_id:?}");
+            assert!(req_id.len() <= BIGQUERY_REQ_ID_LIMIT, "{req_id:?}");
+            Ok(Response::from(
+                QueryResponse::new().set_query_id("some_query_id"),
+            ))
+        });
         let job_service = create_job_service(mock);
         let run_query =
             RunQuery::new(job_service, "SELECT 1".to_string()).with_project_id("my-project");
         let query = run_query.run().await?;
         assert!(!query.completed, "{query:?}");
-        assert!(query.initial_response.is_some(), "{query:?}");
+        assert_eq!(query.metadata.query_id, "some_query_id");
 
         Ok(())
     }

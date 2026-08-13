@@ -29,11 +29,12 @@ pub use google_cloud_gax::Result;
 pub use google_cloud_gax::error::Error;
 pub mod error;
 pub use crate::error::{ConvertError, QueryError, RowError};
-pub use crate::query::{FromSql, Interval, Range, Row};
+pub use crate::query::{CompleteQuery, FromSql, Interval, Query, Range, Row, RowIterator};
 pub use google_cloud_bigquery_derive::{FromRow, FromSql};
 
 pub(crate) mod generated;
 pub(crate) mod query;
+pub(crate) mod retry_policy;
 pub(crate) use google_cloud_gax::client_builder::Result as ClientBuilderResult;
 
 /// High-level BigQuery client and execution entrypoints.
@@ -42,8 +43,8 @@ mod client_builder;
 
 pub mod model {
     //! Re-exports for the Google Cloud BigQuery v2 API types.
-    pub use crate::generated::{QueryMetadata, RunQueryRequest};
-    pub use crate::query::{CompleteQuery, Query, QueryReference, RowIterator, RunQuery};
+    pub use crate::generated::{QueryCreationMetadata, QueryMetadata, RunQueryRequest};
+    pub use crate::query::{CompleteQuery, Query, RowIterator, RunQuery};
     pub use google_cloud_bigquery_v2::model::*;
 }
 
