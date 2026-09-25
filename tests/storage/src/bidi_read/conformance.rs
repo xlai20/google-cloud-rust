@@ -42,12 +42,14 @@ const DEFAULT_TEST_ENDPOINT: &str = "https://storage-preprod-test-grpc.googleuse
 
 /// Runs the entire cross-SDK Bidirectional Read conformance test suite,
 /// provisioning the minimal set of 5 buckets (1 per distinct bucket topology).
+///
+/// Whether the Zonal Rapid and Regional Rapid (RCU) tests run in a `colocated`
+/// (`VM_zone == us-central1-a`) or `non-colocated` (`VM_zone != us-central1-a`)
+/// topology depends on the zone of the GCE VM executing the test suite.
 pub async fn run() -> anyhow::Result<()> {
     println!("\n=== Running Bidi Read Conformance Suite ===");
 
-    let client = &build_storage_client(None).await?;
-    let non_colocated_client =
-        &build_storage_client(Some("https://us-central1-b-storage.googleapis.com")).await?;
+    let client = &build_storage_client().await?;
 
     // 0. Bucketless test case (Test 4)
     non_existent_bucket_read(client).await?;
@@ -68,28 +70,23 @@ pub async fn run() -> anyhow::Result<()> {
     })
     .await?;
 
-    // 3. Zonal Rapid (HNS is always enabled) — shared across both colocated and non-colocated clients
+    // 3. Zonal Rapid (us-central1-a; HNS is always enabled)
     with_zonal_rapid_bucket(|bucket| async move {
-        multiple_ranged_read_zonal_rapid_colocated(client, &bucket).await?;
-        multiple_ranged_read_zonal_rapid_non_colocated(non_colocated_client, &bucket).await?;
+        multiple_ranged_read_zonal_rapid(client, &bucket).await?;
         Ok(())
     })
     .await?;
 
-    // 4. Regional Rapid (RCU - HNS) — cache in us-central1-a; shared across colocated and non-colocated clients
+    // 4. Regional Rapid (RCU - HNS, cache in us-central1-a)
     with_regional_rapid_bucket(true, |bucket| async move {
-        multiple_ranged_read_regional_rapid_hns_colocated(client, &bucket).await?;
-        multiple_ranged_read_regional_rapid_hns_non_colocated(non_colocated_client, &bucket)
-            .await?;
+        multiple_ranged_read_regional_rapid_hns(client, &bucket).await?;
         Ok(())
     })
     .await?;
 
-    // 5. Regional Rapid (RCU - Flat) — cache in us-central1-a; shared across colocated and non-colocated clients
+    // 5. Regional Rapid (RCU - Flat, cache in us-central1-a)
     with_regional_rapid_bucket(false, |bucket| async move {
-        multiple_ranged_read_regional_rapid_flat_colocated(client, &bucket).await?;
-        multiple_ranged_read_regional_rapid_flat_non_colocated(non_colocated_client, &bucket)
-            .await?;
+        multiple_ranged_read_regional_rapid_flat(client, &bucket).await?;
         Ok(())
     })
     .await?;
@@ -103,13 +100,10 @@ pub async fn run() -> anyhow::Result<()> {
 // -----------------------------------------------------------------------------
 
 /// Single centralized factory for building `Storage` data clients in `conformance.rs`.
-/// Uses `DEFAULT_TEST_ENDPOINT` (preprod) unless overridden by `GOOGLE_CLOUD_TEST_STORAGE_ENDPOINT`
-/// or an explicit `custom_endpoint` (e.g., off-zone endpoint).
-async fn build_storage_client(custom_endpoint: Option<&str>) -> anyhow::Result<Storage> {
-    let endpoint = match std::env::var("GOOGLE_CLOUD_TEST_STORAGE_ENDPOINT") {
-        Ok(env_ep) => env_ep,
-        Err(_) => custom_endpoint.unwrap_or(DEFAULT_TEST_ENDPOINT).to_string(),
-    };
+/// Uses `DEFAULT_TEST_ENDPOINT` (preprod) unless overridden by `GOOGLE_CLOUD_TEST_STORAGE_ENDPOINT`.
+async fn build_storage_client() -> anyhow::Result<Storage> {
+    let endpoint = std::env::var("GOOGLE_CLOUD_TEST_STORAGE_ENDPOINT")
+        .unwrap_or_else(|_| DEFAULT_TEST_ENDPOINT.to_string());
     Ok(Storage::builder().with_endpoint(endpoint).build().await?)
 }
 
@@ -321,46 +315,22 @@ pub async fn multiple_ranged_read_regional_standard_flat(
     test_multiple_ranged_read(client, bucket).await
 }
 
-// --- 2. Zonal Rapid (Colocated vs. Non-Colocated; HNS is always enabled) ---
+// --- 2. Zonal Rapid (HNS is always enabled) ---
 
-pub async fn multiple_ranged_read_zonal_rapid_colocated(
+pub async fn multiple_ranged_read_zonal_rapid(client: &Storage, bucket: &str) -> anyhow::Result<()> {
+    test_multiple_ranged_read(client, bucket).await
+}
+
+// --- 3. Regional Rapid / RCU (HNS vs. Flat) ---
+
+pub async fn multiple_ranged_read_regional_rapid_hns(
     client: &Storage,
     bucket: &str,
 ) -> anyhow::Result<()> {
     test_multiple_ranged_read(client, bucket).await
 }
 
-pub async fn multiple_ranged_read_zonal_rapid_non_colocated(
-    client: &Storage,
-    bucket: &str,
-) -> anyhow::Result<()> {
-    test_multiple_ranged_read(client, bucket).await
-}
-
-// --- 3. Regional Rapid / RCU (HNS vs. Flat × Colocated vs. Non-Colocated relative to cache zone) ---
-
-pub async fn multiple_ranged_read_regional_rapid_hns_colocated(
-    client: &Storage,
-    bucket: &str,
-) -> anyhow::Result<()> {
-    test_multiple_ranged_read(client, bucket).await
-}
-
-pub async fn multiple_ranged_read_regional_rapid_hns_non_colocated(
-    client: &Storage,
-    bucket: &str,
-) -> anyhow::Result<()> {
-    test_multiple_ranged_read(client, bucket).await
-}
-
-pub async fn multiple_ranged_read_regional_rapid_flat_colocated(
-    client: &Storage,
-    bucket: &str,
-) -> anyhow::Result<()> {
-    test_multiple_ranged_read(client, bucket).await
-}
-
-pub async fn multiple_ranged_read_regional_rapid_flat_non_colocated(
+pub async fn multiple_ranged_read_regional_rapid_flat(
     client: &Storage,
     bucket: &str,
 ) -> anyhow::Result<()> {
