@@ -223,8 +223,11 @@ async fn test_appendable_upload_empty_object(
         "\n--- Testing Appendable Upload Empty Object ({}) ---",
         bucket_type.label()
     );
+
+    // Arrange
     let object_name = random_object_name("empty");
 
+    // Act
     let writer = clients
         .grpc
         .open_appendable_object(bucket_name, &object_name)
@@ -232,6 +235,7 @@ async fn test_appendable_upload_empty_object(
         .await?;
     let object = writer.finalize().await?;
 
+    // Assert
     verify_finalized_object(&clients.grpc, bucket_name, &object_name, &object, b"").await?;
 
     println!(
@@ -252,6 +256,8 @@ async fn test_multi_chunk_appendable_upload(
         "\n--- Testing Multi Chunk Appendable Upload & Finalization ({}) ---",
         bucket_type.label()
     );
+
+    // Arrange
     const KIB: usize = 1024;
     let object_name = random_object_name("multi_chunk");
     let payload = test_payload(64 * KIB);
@@ -259,6 +265,7 @@ async fn test_multi_chunk_appendable_upload(
     let chunk1 = payload.slice(..mid);
     let chunk2 = payload.slice(mid..);
 
+    // Act
     let mut writer = clients
         .grpc
         .open_appendable_object(bucket_name, &object_name)
@@ -268,6 +275,7 @@ async fn test_multi_chunk_appendable_upload(
     writer.append(chunk2).await?;
     let object = writer.finalize().await?;
 
+    // Assert
     verify_finalized_object(&clients.grpc, bucket_name, &object_name, &object, &payload).await?;
 
     println!(
@@ -285,9 +293,12 @@ async fn test_explicit_flush(
     bucket_type: BucketType,
 ) -> anyhow::Result<()> {
     println!("\n--- Testing Explicit Flush ({}) ---", bucket_type.label());
+
+    // Arrange
     let object_name = random_object_name("explicit_flush");
     let payload = test_payload(10_000);
 
+    // Act & Assert: Intermediate Flush Checkpoint
     let mut writer = clients
         .grpc
         .open_appendable_object(bucket_name, &object_name)
@@ -298,9 +309,11 @@ async fn test_explicit_flush(
     assert_eq!(persisted, 1);
     assert_eq!(writer.persisted_size(), 1);
 
+    // Act: Append Remaining Data & Finalize
     writer.append(payload.slice(1..)).await?;
     let object = writer.finalize().await?;
 
+    // Assert: Final Object Verification
     verify_finalized_object(&clients.grpc, bucket_name, &object_name, &object, &payload).await?;
 
     println!("SUCCESS: Explicit Flush ({})", bucket_type.label());
@@ -319,14 +332,16 @@ async fn test_appendable_upload_takeover(
         "\n--- Testing Appendable Upload Takeover ({}) ---",
         bucket_type.label()
     );
+
+    // Arrange
     let object_name = random_object_name("takeover");
     let payload = test_payload(10_000);
     let mid = (payload.len() / 2) + 1;
     let chunk1 = payload.slice(..mid);
     let chunk2 = payload.slice(mid..);
-
     let chunk1_len = chunk1.len() as i64;
 
+    // Act: Session 1 (Write chunk 1 and close without finalizing)
     let mut writer1 = clients
         .grpc
         .open_appendable_object(bucket_name, &object_name)
@@ -335,8 +350,11 @@ async fn test_appendable_upload_takeover(
     writer1.append(chunk1).await?;
     let generation = writer1.generation();
     let persisted = writer1.close().await?;
+
+    // Assert: Session 1
     assert_eq!(persisted, chunk1_len);
 
+    // Act: Session 2 (Reopen same object generation, append chunk 2, and finalize)
     let mut writer2 = clients
         .grpc
         .reopen_appendable_object(bucket_name, &object_name, generation)
@@ -346,6 +364,7 @@ async fn test_appendable_upload_takeover(
     writer2.append(chunk2).await?;
     let object = writer2.finalize().await?;
 
+    // Assert: Session 2 (Final Cumulative Object Verification)
     verify_finalized_object(&clients.grpc, bucket_name, &object_name, &object, &payload).await?;
 
     println!(
@@ -367,9 +386,13 @@ async fn test_takeover_just_to_finalize(
         "\n--- Testing Takeover Just to Finalize ({}) ---",
         bucket_type.label()
     );
+
+    // Arrange
     let object_name = random_object_name("takeover_finalize");
     let payload = test_payload(10_000);
+    let payload_len = payload.len() as i64;
 
+    // Act: Session 1 (Write full payload and close without finalizing)
     let mut writer1 = clients
         .grpc
         .open_appendable_object(bucket_name, &object_name)
@@ -378,16 +401,20 @@ async fn test_takeover_just_to_finalize(
     writer1.append(payload.clone()).await?;
     let generation = writer1.generation();
     let persisted = writer1.close().await?;
-    assert_eq!(persisted, payload.len() as i64);
 
+    // Assert: Session 1
+    assert_eq!(persisted, payload_len);
+
+    // Act: Session 2 (Reopen same object generation and finalize without appending)
     let writer2 = clients
         .grpc
         .reopen_appendable_object(bucket_name, &object_name, generation)
         .send()
         .await?;
-    assert_eq!(writer2.persisted_size(), payload.len() as i64);
+    assert_eq!(writer2.persisted_size(), payload_len);
     let object = writer2.finalize().await?;
 
+    // Assert: Session 2 (Final Object Verification)
     verify_finalized_object(&clients.grpc, bucket_name, &object_name, &object, &payload).await?;
 
     println!(
