@@ -212,7 +212,7 @@ async fn verify_finalized_object(
     Ok(())
 }
 
-/// Spec #1: Opens an appendable upload and immediately finalizes it without writing bytes.
+/// Opens an appendable upload and immediately finalizes it without writing bytes.
 /// Asserts `object.size == 0`, CRC32C checksum of empty bytes (`0`), and empty read-back content.
 async fn test_appendable_upload_empty_object(
     clients: &Clients,
@@ -241,7 +241,7 @@ async fn test_appendable_upload_empty_object(
     Ok(())
 }
 
-/// Spec #2 (and #6): Writes multiple byte chunks with Appendable Upload, finalizes,
+/// Writes multiple byte chunks with Appendable Upload, finalizes,
 /// and asserts total size, cumulative CRC32C, and binary equivalence on read-back.
 async fn test_multi_chunk_appendable_upload(
     clients: &Clients,
@@ -277,7 +277,7 @@ async fn test_multi_chunk_appendable_upload(
     Ok(())
 }
 
-/// Spec #3: Writes 1 byte, explicitly invokes `writer.flush()`, writes remaining data,
+/// Writes 1 byte, explicitly invokes `writer.flush()`, writes remaining data,
 /// finalizes, and verifies final object size, CRC32C checksum, and read-back content.
 async fn test_explicit_flush(
     clients: &Clients,
@@ -307,9 +307,9 @@ async fn test_explicit_flush(
     Ok(())
 }
 
-/// Spec #4 (and #9): Session 1 writes chunk 1 and closes without finalizing.
-/// Session 2 reopens the same object generation, appends chunk 2, and finalizes,
-/// verifying cumulative size, cumulative CRC32C, and read-back content.
+/// Session 1 writes chunk 1 and closes without finalizing. Session 2 reopens the
+/// same object generation, appends chunk 2, and finalizes, verifying cumulative
+/// size, cumulative CRC32C, and read-back content.
 async fn test_appendable_upload_takeover(
     clients: &Clients,
     bucket_name: &str,
@@ -353,9 +353,9 @@ async fn test_appendable_upload_takeover(
     Ok(())
 }
 
-/// Spec #5 (and #9): Session 1 writes data and closes without finalizing.
-/// Session 2 takes over the object generation and calls `finalize()` without
-/// appending data, verifying object finalization, size, CRC32C, and read-back content.
+/// Session 1 writes data and closes without finalizing. Session 2 takes over the
+/// object generation and calls `finalize()` without appending data, verifying
+/// object finalization, size, CRC32C, and read-back content.
 async fn test_takeover_just_to_finalize(
     clients: &Clients,
     bucket_name: &str,
