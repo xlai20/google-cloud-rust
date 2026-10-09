@@ -18,15 +18,13 @@ use bytes::Bytes;
 use futures::FutureExt as _;
 use google_cloud_gax::exponential_backoff::ExponentialBackoffBuilder;
 use google_cloud_gax::options::RequestOptionsBuilder as _;
-use google_cloud_gax::paginator::ItemPaginator as _;
 use google_cloud_gax::retry_policy::RetryPolicyExt as _;
-use google_cloud_lro::Poller as _;
 use google_cloud_storage::client::{Storage, StorageControl};
 use google_cloud_storage::model::bucket::iam_config::UniformBucketLevelAccess;
 use google_cloud_storage::model::bucket::{
     CustomPlacementConfig, HierarchicalNamespace, IamConfig,
 };
-use google_cloud_storage::model::{Bucket, Object, RapidCache};
+use google_cloud_storage::model::{Bucket, Object};
 use google_cloud_storage::model_ext::ReadRange;
 use google_cloud_storage::retry_policy::RetryableErrors;
 use google_cloud_test_utils::resource_names::{LowercaseAlphanumeric, random_bucket_id};
@@ -34,7 +32,7 @@ use google_cloud_test_utils::runtime_config::{project_id, region_id, zone_id};
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
-/// Runs the bidi write conformance tests against each supported Rapid bucket type.
+/// Runs the bidi write conformance tests against the supported Zonal Rapid bucket type.
 pub async fn run() -> anyhow::Result<()> {
     println!("\n========================================================");
     println!(" Running Bidi Write Conformance Integration Test Suite");
@@ -42,16 +40,14 @@ pub async fn run() -> anyhow::Result<()> {
 
     let clients = Clients::new().await?;
 
-    for bucket_type in [BucketType::ZonalRapid, BucketType::RegionalRapid] {
-        with_bucket(&clients, bucket_type, async |bucket, bucket_type| {
-            test_appendable_upload_empty_object(&clients, bucket, bucket_type).await?;
-            test_multi_chunk_appendable_upload(&clients, bucket, bucket_type).await?;
-            test_explicit_flush(&clients, bucket, bucket_type).await?;
-            test_appendable_upload_takeover(&clients, bucket, bucket_type).await?;
-            test_takeover_just_to_finalize(&clients, bucket, bucket_type).await
-        })
-        .await?;
-    }
+    with_bucket(&clients, BucketType::ZonalRapid, async |bucket, bucket_type| {
+        test_appendable_upload_empty_object(&clients, bucket, bucket_type).await?;
+        test_multi_chunk_appendable_upload(&clients, bucket, bucket_type).await?;
+        test_explicit_flush(&clients, bucket, bucket_type).await?;
+        test_appendable_upload_takeover(&clients, bucket, bucket_type).await?;
+        test_takeover_just_to_finalize(&clients, bucket, bucket_type).await
+    })
+    .await?;
 
     println!("\n>>> All Bidi Write Conformance integration tests completed successfully! <<<\n");
     Ok(())
@@ -93,19 +89,13 @@ impl Clients {
 #[derive(Clone, Copy, Debug)]
 enum BucketType {
     ZonalRapid,
-    RegionalRapid,
 }
 
 impl BucketType {
     fn label(self) -> &'static str {
         match self {
             Self::ZonalRapid => "Zonal Rapid",
-            Self::RegionalRapid => "Regional Rapid (HNS)",
         }
-    }
-
-    fn has_rapid_cache(self) -> bool {
-        matches!(self, Self::RegionalRapid)
     }
 }
 
@@ -124,40 +114,38 @@ where
     let result = AssertUnwindSafe(f(&bucket.name, bucket_type))
         .catch_unwind()
         .await;
-    cleanup_bucket(
-        &clients.control,
-        &bucket.name,
-        bucket_type.has_rapid_cache(),
-    )
-    .await;
+    cleanup_bucket(&clients.control, &bucket.name).await;
     match result {
         Ok(result) => result,
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }
 
-/// For Regional Rapid, also attaches the cache, and deletes the bucket if that fails.
 async fn create_bucket(
     control: &StorageControl,
-    bucket_type: BucketType,
+    _bucket_type: BucketType,
     bucket_id: String,
 ) -> anyhow::Result<Bucket> {
     let zone = zone_id();
-    // Zonal Rapid and Regional Rapid are only supported with HNS enabled.
-    let mut bucket = Bucket::new()
+    // Derive region from zone if zone follows standard `{region}-{zone_letter}` pattern,
+    // otherwise fallback to `region_id()`. This prevents region/zone mismatch errors.
+    let region = zone
+        .rsplit_once('-')
+        .map(|(r, _)| r.to_string())
+        .unwrap_or_else(region_id);
+
+    // Zonal Rapid is only supported with HNS enabled.
+    let bucket = Bucket::new()
         .set_project(format!("projects/{}", project_id()?))
-        .set_location(region_id())
+        .set_location(region)
         .set_labels([("integration-test", "true")])
         .set_hierarchical_namespace(HierarchicalNamespace::new().set_enabled(true))
         .set_iam_config(
             IamConfig::new()
                 .set_uniform_bucket_level_access(UniformBucketLevelAccess::new().set_enabled(true)),
-        );
-    if matches!(bucket_type, BucketType::ZonalRapid) {
-        bucket = bucket
-            .set_custom_placement_config(CustomPlacementConfig::new().set_data_locations([&zone]))
-            .set_storage_class("RAPID");
-    }
+        )
+        .set_custom_placement_config(CustomPlacementConfig::new().set_data_locations([&zone]))
+        .set_storage_class("RAPID");
 
     let bucket = control
         .create_bucket()
@@ -168,35 +156,11 @@ async fn create_bucket(
         .send()
         .await?;
 
-    if bucket_type.has_rapid_cache() {
-        let rapid_cache = RapidCache::new()
-            .set_name(format!("{}/rapidCaches/{zone}", bucket.name))
-            .set_zone(&zone)
-            .set_cache_type("rapid-cache-ultra");
-
-        println!("Attaching rapid-cache-ultra in {zone} (this can take a minute or more)...");
-        let attached = control
-            .create_rapid_cache()
-            .set_parent(&bucket.name)
-            .set_rapid_cache(rapid_cache)
-            .poller()
-            .until_done()
-            .await;
-        if let Err(e) = attached {
-            cleanup_bucket(control, &bucket.name, true).await;
-            return Err(e.into());
-        }
-        println!("SUCCESS: attached rapid-cache-ultra in {zone}");
-    }
-
     Ok(bucket)
 }
 
 /// Deletes a bucket and everything in it. Failures are printed, not returned.
-async fn cleanup_bucket(control: &StorageControl, bucket_name: &str, has_rapid_cache: bool) {
-    if has_rapid_cache {
-        disable_rapid_caches(control, bucket_name).await;
-    }
+async fn cleanup_bucket(control: &StorageControl, bucket_name: &str) {
     let result = match project_id() {
         Ok(project_id) => {
             storage_samples::cleanup_bucket(control.clone(), bucket_name.to_string(), project_id)
@@ -206,42 +170,6 @@ async fn cleanup_bucket(control: &StorageControl, bucket_name: &str, has_rapid_c
     };
     if let Err(e) = result {
         eprintln!("Warning: failed to delete bucket {bucket_name} during teardown: {e:?}");
-    }
-}
-
-async fn disable_rapid_caches(control: &StorageControl, bucket_name: &str) {
-    let mut caches = control
-        .list_rapid_caches()
-        .set_parent(bucket_name)
-        .by_item();
-    while let Some(cache) = caches.next().await {
-        let cache = match cache {
-            Ok(cache) => cache,
-            Err(e) => {
-                eprintln!(
-                    "Warning: failed to list rapid caches in {bucket_name} during teardown: {e:?}"
-                );
-                return;
-            }
-        };
-        println!("Disabling rapid cache {}...", cache.name);
-        let result = control
-            .disable_rapid_cache()
-            .set_name(&cache.name)
-            .poller()
-            .until_done()
-            .await;
-        // b/565175323: the cache is disabled, but the LRO returns an empty result.
-        if let Err(e) = result
-            && !format!("{e:?}").contains("neither result nor error set in LRO result")
-        {
-            eprintln!(
-                "Warning: failed to disable rapid cache {}: {e:?}",
-                cache.name
-            );
-        } else {
-            println!("SUCCESS: disabled rapid cache {}", cache.name);
-        }
     }
 }
 
