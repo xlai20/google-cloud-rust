@@ -325,22 +325,24 @@ async fn test_appendable_upload_takeover(
     let chunk1 = payload.slice(..mid);
     let chunk2 = payload.slice(mid..);
 
+    let chunk1_len = chunk1.len() as i64;
+
     let mut writer1 = clients
         .grpc
         .open_appendable_object(bucket_name, &object_name)
         .send()
         .await?;
-    writer1.append(chunk1.clone()).await?;
+    writer1.append(chunk1).await?;
     let generation = writer1.generation();
     let persisted = writer1.close().await?;
-    assert_eq!(persisted, chunk1.len() as i64);
+    assert_eq!(persisted, chunk1_len);
 
     let mut writer2 = clients
         .grpc
         .reopen_appendable_object(bucket_name, &object_name, generation)
         .send()
         .await?;
-    assert_eq!(writer2.persisted_size(), chunk1.len() as i64);
+    assert_eq!(writer2.persisted_size(), chunk1_len);
     writer2.append(chunk2).await?;
     let object = writer2.finalize().await?;
 
